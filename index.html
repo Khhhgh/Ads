@@ -39,8 +39,12 @@
         const AdController = window.Adsgram.init({ blockId: "53002" });
 
         AdController.show().then((result) => {
+            // إرسال إشارة إتمام الإعلان للبوت
             tg.sendData("reward_granted");
+            // إغلاق نافذة الميني آب فوراً
+            tg.close();
         }).catch((result) => {
+            // إغلاق النافذة في حال تم إلغاء الإعلان أو حدث خطأ
             tg.close();
         });
     </script>
