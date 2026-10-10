@@ -22,31 +22,107 @@
             padding: 20px;
             border-radius: 12px;
             background: #1e1e1e;
+            max-width: 90vw;
         }
+        .err { color: #ff6b6b; }
     </style>
 </head>
 <body>
     <div class="box">
-        <h3>جاري تجهيز الإعلان... ⏳</h3>
+        <h3 id="title">جاري تجهيز الإعلان... ⏳</h3>
         <p>شاهد الفيديو كاملاً لتحصل على التنزيلات الإضافية.</p>
     </div>
 
     <script>
-        const tg = window.Telegram.WebApp;
+        // ================== الإعدادات ==================
+        // 1) هذه الصفحة تُفتح من زر Inline (web_app) داخل البوت، لذلك تتوفر
+        //    Strong initData التي يحتاجها Adsgram للعمل.
+        // 2) بعد إتمام الإعلان ترسل النتيجة إلى سيرفر البوت عبر POST، لأن
+        //    sendData() لا تعمل إلا مع الكيبورد السفلي (Reply Keyboard).
+        // 3) عند استضافتها من سيرفر البوت نفسه يكون الـ endpoint على نفس
+        //    الأصل تلقائياً، ويمكن تجاوزه عبر ?reward=... عند الاستضافة
+        //    الخارجية (GitHub Pages).
+        // ===============================================
+        const DEFAULT_REWARD_ENDPOINT = location.origin + "/webapp/reward";
+
+        const params = new URLSearchParams(window.location.search);
+        const REWARD_ENDPOINT = (params.get("reward") || DEFAULT_REWARD_ENDPOINT).trim();
+        // Adsgram validates that the page URL equals the "app url" registered
+        // for the blockId. Strip the ?reward= hint from the address bar before
+        // the SDK reads location, so the comparison always sees the clean URL.
+        if (params.has("reward")) {
+            try {
+                history.replaceState(null, "", location.pathname + location.hash);
+            } catch (e) { /* ignore */ }
+        }
+
+        const tg = window.Telegram?.WebApp;
+        const titleEl = document.getElementById("title");
+
+        function fail(msg) {
+            titleEl.classList.add("err");
+            titleEl.textContent = msg;
+        }
+
+        if (!tg) {
+            fail("افتح هذه الصفحة من داخل تيليجرام.");
+            throw new Error("Telegram WebApp unavailable");
+        }
+
         tg.ready();
         tg.expand();
 
-        const AdController = window.Adsgram.init({ blockId: "53002" });
+        // تحقق من وجود بيانات الإطلاق (يجب أن تُفتح الصفحة من زر Inline).
+        const initData = tg.initData || "";
+        if (!initData) {
+            // كحل احتياطي فقط: زر الكيبورد السفلي لا يمنح initData لكنّ
+            // sendData() تعمل معه. نحاول إخبار البوت مباشرة.
+            if (typeof tg.sendData === "function") {
+                tg.sendData("reward_granted");
+                tg.close();
+                throw new Error("reply-keyboard fallback used");
+            }
+            fail("لم يتم العثور على بيانات جلسة تيليجرام. افتح الإعلان من البوت.");
+            throw new Error("No initData");
+        }
 
-        AdController.show().then((result) => {
-            // إرسال إشارة إتمام الإعلان للبوت
-            tg.sendData("reward_granted");
-            // إغلاق نافذة الميني آب فوراً
-            tg.close();
-        }).catch((result) => {
-            // إغلاق النافذة في حال تم إلغاء الإعلان أو حدث خطأ
-            tg.close();
-        });
+        async function reportReward() {
+            if (!REWARD_ENDPOINT) {
+                fail("لم يتم ضبط رابط سيرفر البوت (reward endpoint).");
+                return;
+            }
+            try {
+                const body = new URLSearchParams();
+                body.set("initData", initData);
+                await fetch(REWARD_ENDPOINT, {
+                    method: "POST",
+                    // application/x-www-form-urlencoded => طلب بسيط بلا preflight
+                    body: body,
+                    keepalive: true,
+                });
+            } catch (e) {
+                // لا نمنع المستخدم؛ البوت قد يكون استقبل الطلب بالفعل.
+                console.warn("reward post failed", e);
+            } finally {
+                tg.close();
+            }
+        }
+
+        const AdController = window.Adsgram && window.Adsgram.init({ blockId: "53002" });
+        if (!AdController) {
+            fail("تعذّر تحميل شبكة الإعلانات.");
+            throw new Error("Adsgram unavailable");
+        }
+
+        AdController.show()
+            .then(() => {
+                // شاهد المستخدم الإعلان كاملاً -> أبلغ البوت.
+                reportReward();
+            })
+            .catch((result) => {
+                // ألغى المستخدم الإعلان أو حدث خطأ أثناء التشغيل.
+                tg.close();
+            });
     </script>
 </body>
 </html>
