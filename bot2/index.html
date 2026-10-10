@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>إعلان المكافأة</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://sad.adsgram.ai/js/sad.min.js"></script>
+    <style>
+        body { margin: 0; display: flex; justify-content: center; align-items: center;
+               height: 100vh; background-color: #121212; color: #fff;
+               font-family: sans-serif; text-align: center; }
+        .box { padding: 20px; border-radius: 12px; background: #1e1e1e; max-width: 90vw; }
+        .err { color: #ff6b6b; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h3 id="title">جاري تجهيز الإعلان... ⏳</h3>
+        <p>شاهد الفيديو كاملاً لتحصل على التنزيلات الإضافية.</p>
+    </div>
+    <script>
+        const BOT_ID = "Tgco0rv2_bot";
+        const BLOCK_ID = "000";
+        const DEFAULT_REWARD_ENDPOINT = location.origin + "/webapp/reward/" + BOT_ID;
+
+        const params = new URLSearchParams(window.location.search);
+        const REWARD_ENDPOINT = (params.get("reward") || DEFAULT_REWARD_ENDPOINT).trim();
+        if (params.has("reward")) {
+            try { history.replaceState(null, "", location.pathname + location.hash); } catch (e) {}
+        }
+
+        const tg = window.Telegram?.WebApp;
+        const titleEl = document.getElementById("title");
+        function fail(msg) { titleEl.classList.add("err"); titleEl.textContent = msg; }
+
+        if (!tg) { fail("افتح هذه الصفحة من داخل تيليجرام."); throw new Error("Telegram WebApp unavailable"); }
+        tg.ready();
+        tg.expand();
+
+        const initData = tg.initData || "";
+        if (!initData) {
+            if (typeof tg.sendData === "function") {
+                tg.sendData("reward_granted");
+                tg.close();
+                throw new Error("reply-keyboard fallback used");
+            }
+            fail("لم يتم العثور على بيانات جلسة تيليجرام. افتح الإعلان من البوت.");
+            throw new Error("No initData");
+        }
+
+        async function reportReward() {
+            if (!REWARD_ENDPOINT) { fail("لم يتم ضبط رابط سيرفر البوت (reward endpoint)."); return; }
+            try {
+                const body = new URLSearchParams();
+                body.set("initData", initData);
+                await fetch(REWARD_ENDPOINT, { method: "POST", body: body, keepalive: true });
+            } catch (e) { console.warn("reward post failed", e); }
+            finally { tg.close(); }
+        }
+
+        const AdController = window.Adsgram && window.Adsgram.init({ blockId: BLOCK_ID });
+        if (!AdController) { fail("تعذّر تحميل شبكة الإعلانات."); throw new Error("Adsgram unavailable"); }
+
+        AdController.show()
+            .then(() => { reportReward(); })
+            .catch(() => { tg.close(); });
+    </script>
+</body>
+</html>
