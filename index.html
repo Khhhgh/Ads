@@ -35,21 +35,11 @@
 
     <script>
         // ================== الإعدادات ==================
-        // 1) هذه الصفحة تُفتح من زر Inline (web_app) داخل البوت، لذلك تتوفر
-        //    Strong initData التي يحتاجها Adsgram للعمل.
-        // 2) بعد إتمام الإعلان ترسل النتيجة إلى سيرفر البوت عبر POST، لأن
-        //    sendData() لا تعمل إلا مع الكيبورد السفلي (Reply Keyboard).
-        // 3) عند استضافتها من سيرفر البوت نفسه يكون الـ endpoint على نفس
-        //    الأصل تلقائياً، ويمكن تجاوزه عبر ?reward=... عند الاستضافة
-        //    الخارجية (GitHub Pages).
-        // ===============================================
         const DEFAULT_REWARD_ENDPOINT = location.origin + "/webapp/reward";
 
         const params = new URLSearchParams(window.location.search);
         const REWARD_ENDPOINT = (params.get("reward") || DEFAULT_REWARD_ENDPOINT).trim();
-        // Adsgram validates that the page URL equals the "app url" registered
-        // for the blockId. Strip the ?reward= hint from the address bar before
-        // the SDK reads location, so the comparison always sees the clean URL.
+
         if (params.has("reward")) {
             try {
                 history.replaceState(null, "", location.pathname + location.hash);
@@ -72,11 +62,8 @@
         tg.ready();
         tg.expand();
 
-        // تحقق من وجود بيانات الإطلاق (يجب أن تُفتح الصفحة من زر Inline).
         const initData = tg.initData || "";
         if (!initData) {
-            // كحل احتياطي فقط: زر الكيبورد السفلي لا يمنح initData لكنّ
-            // sendData() تعمل معه. نحاول إخبار البوت مباشرة.
             if (typeof tg.sendData === "function") {
                 tg.sendData("reward_granted");
                 tg.close();
@@ -86,7 +73,14 @@
             throw new Error("No initData");
         }
 
+        // متغيرات للتحكم الدقيق في منح الرصيد
+        let rewardReported = false; // حماية ضد التكرار
+        let adStarted = false;      // يتحول إلى true فقط إذا بدأ عرض الإعلان فعلياً للمستخدم
+
         async function reportReward() {
+            if (rewardReported) return;
+            rewardReported = true;
+
             if (!REWARD_ENDPOINT) {
                 fail("لم يتم ضبط رابط سيرفر البوت (reward endpoint).");
                 return;
@@ -96,33 +90,69 @@
                 body.set("initData", initData);
                 await fetch(REWARD_ENDPOINT, {
                     method: "POST",
-                    // application/x-www-form-urlencoded => طلب بسيط بلا preflight
                     body: body,
                     keepalive: true,
                 });
             } catch (e) {
-                // لا نمنع المستخدم؛ البوت قد يكون استقبل الطلب بالفعل.
                 console.warn("reward post failed", e);
             } finally {
                 tg.close();
             }
         }
 
-        const AdController = window.Adsgram && window.Adsgram.init({ blockId: "53002" });
-        if (!AdController) {
-            fail("تعذّر تحميل شبكة الإعلانات.");
-            throw new Error("Adsgram unavailable");
+        // التحقق من تحميل مكتبة Adsgram (في حال تم حظر السكريبت أو فشل الاتصال)
+        let AdController = null;
+        try {
+            if (window.Adsgram) {
+                AdController = window.Adsgram.init({ blockId: "53002" });
+            }
+        } catch (err) {
+            console.error("Adsgram init error:", err);
         }
 
-        AdController.show()
-            .then(() => {
-                // شاهد المستخدم الإعلان كاملاً -> أبلغ البوت.
-                reportReward();
-            })
-            .catch((result) => {
-                // ألغى المستخدم الإعلان أو حدث خطأ أثناء التشغيل.
-                tg.close();
+        // إذا تعذر جلب السكريبت أو تهيئة الإعلانات تماماً -> منح الرصيد وإغلاق الصفحة فوراً
+        if (!AdController) {
+            reportReward();
+        } else {
+            // 1. حدث بدء تشغيل الإعلان فعلياً على شاشة المستخدم
+            AdController.addEventListener('onStart', () => {
+                adStarted = true;
             });
+
+            // 2. حدث عدم توفر إعلان متاح في السيرفر (No Fill / Banner Not Found)
+            AdController.addEventListener('onBannerNotFound', () => {
+                reportReward(); // منح الرصيد تعويضاً للمستخدم
+            });
+
+            // 3. حدث وقوع خطأ تقني في الجلب
+            AdController.addEventListener('onError', (err) => {
+                if (!adStarted) {
+                    reportReward(); // منح الرصيد إذا حدث الخطأ قبل بدء الإعلان
+                }
+            });
+
+            // 4. طلب تشغيل الإعلان
+            AdController.show()
+                .then(() => {
+                    // شاهد المستخدم الإعلان كاملاً بنجاح
+                    reportReward();
+                })
+                .catch((result) => {
+                    // التمييز الدقيق بين فشل الإعلان وبين تخطي المستخدم له
+                    const isFailure = !adStarted || 
+                                      result?.error === true || 
+                                      result?.state === 'load' || 
+                                      result?.state === 'render';
+
+                    if (isFailure) {
+                        // فشل الإعلان في التحميل أو لم يظهر أساساً -> منحه الرصيد تعويضاً
+                        reportReward();
+                    } else {
+                        // الإعلان ظهر واشتغل، لكن المستخدم تعمد إغلاقه أو تخطيه -> إغلاق بدون رصيد
+                        tg.close();
+                    }
+                });
+        }
     </script>
 </body>
 </html>
