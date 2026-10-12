@@ -88,11 +88,18 @@
             try {
                 const body = new URLSearchParams();
                 body.set("initData", initData);
-                await fetch(REWARD_ENDPOINT, {
+                // ننتظر رد السيرفر بالكامل قبل الإغلاق، حتى لا تُغلق النافذة
+                // والطلب لم يصل/لم يُعالج بعد.
+                const res = await fetch(REWARD_ENDPOINT, {
                     method: "POST",
                     body: body,
                     keepalive: true,
                 });
+                // تفريغ جسم الرد يضمن تسليم الطلب كاملاً للسيرفر.
+                try { await res.text(); } catch (e) { /* ignore */ }
+                if (!res.ok) {
+                    console.warn("reward endpoint returned", res.status);
+                }
             } catch (e) {
                 console.warn("reward post failed", e);
             } finally {
