@@ -25,6 +25,7 @@
             max-width: 90vw;
         }
         .err { color: #ff6b6b; }
+        .ok { color: #6bff9e; }
     </style>
 </head>
 <body>
@@ -73,17 +74,30 @@
             throw new Error("No initData");
         }
 
-        // متغيرات للتحكم الدقيق في منح الرصيد
-        let rewardReported = false; // حماية ضد التكرار
-        let adStarted = false;      // يتحول إلى true فقط إذا بدأ عرض الإعلان فعلياً للمستخدم
+        // ==========================================================================
+        //  متغيّرات حالة دقيقة للتمييز بين الحالات الثلاث:
+        //   1) مكافأة   : شاهد الإعلان كاملاً        -> status=reward
+        //   2) تعويض    : لم يتوفر إعلان من الأساس    -> status=noads  (يمنح 4)
+        //   3) إلغاء    : ظهر الإعلان ثم أغلقه المستخدم -> لا شيء ولا مكافأة
+        //
+        //  قاعدة الأمان: لا نمنح التعويض إلا إذا تأكدنا أنه لم يبدأ عرض أي
+        //  إعلان إطلاقاً. أي إشارة إلى ظهور الإعلان (onStart / onSkip /
+        //  onReward / onComplete) تقتل مسار التعويض نهائياً.
+        // ==========================================================================
+        let finished = false;   // تم إرسال طلب نهائي (مكافأة/تعويض) أو إغلاق مقصود
+        let adStarted = false;  // ظهر أول إطار من الإعلان فعلياً على الشاشة
+        let adResolved = false; // حسم الإعلان (مكافأة/تخطٍ/خطأ) دون حاجة لمهلة
 
-        // status:
-        //   "reward" -> شاهد المستخدم الإعلان كاملاً بنجاح (المكافأة العادية)
-        //   "noads"  -> تعذّر جلب إعلان (No Fill / فشل تقني / حظر السكريبت)
-        //               => السيرفر يمنح رصيد التعويض (Grace Fallback) ويكمل التحميل
+        function markAborted() {
+            // ظهر الإعلان أو انتهى بأي شكل: لا تعويض بعد الآن.
+            adStarted = true;
+            adResolved = true;
+        }
+
+        // status: "reward" | "noads"
         async function reportReward(status) {
-            if (rewardReported) return;
-            rewardReported = true;
+            if (finished) return;
+            finished = true;
 
             if (!REWARD_ENDPOINT) {
                 fail("لم يتم ضبط رابط سيرفر البوت (reward endpoint).");
@@ -93,14 +107,12 @@
                 const body = new URLSearchParams();
                 body.set("initData", initData);
                 body.set("status", status === "noads" ? "noads" : "reward");
-                // ننتظر رد السيرفر بالكامل قبل الإغلاق، حتى لا تُغلق النافذة
-                // والطلب لم يصل/لم يُعالج بعد.
+                // ننتظر رد السيرفر قبل الإغلاق حتى لا تُغلق النافذة والطلب لم يصل.
                 const res = await fetch(REWARD_ENDPOINT, {
                     method: "POST",
                     body: body,
                     keepalive: true,
                 });
-                // تفريغ جسم الرد يضمن تسليم الطلب كاملاً للسيرفر.
                 try { await res.text(); } catch (e) { /* ignore */ }
                 if (!res.ok) {
                     console.warn("reward endpoint returned", res.status);
@@ -108,9 +120,19 @@
             } catch (e) {
                 console.warn("reward post failed", e);
             } finally {
-                // تُغلق نافذة الـ WebApp فوراً في كل الحالات.
                 tg.close();
             }
+        }
+
+        function abortWithoutReward() {
+            // المستخدم أغلق الإعلان قبل نهايته: لا تعويض ولا مكافأة، وإبلاغه بالإلغاء.
+            if (finished) return;
+            finished = true;
+            titleEl.classList.remove("err");
+            titleEl.classList.add("ok");
+            titleEl.textContent = "لم يكتمل الإعلان، تم إلغاء العملية. حاول مرة أخرى.";
+            // مهلة قصيرة ليرى الرسالة ثم تُغلق النافذة.
+            setTimeout(() => { try { tg.close(); } catch (e) {} }, 1200);
         }
 
         // التحقق من تحميل مكتبة Adsgram (في حال تم حظر السكريبت أو فشل الاتصال)
@@ -123,61 +145,133 @@
             console.error("Adsgram init error:", err);
         }
 
-        // إذا تعذر جلب السكريبت أو تهيئة الإعلانات تماماً
-        // => لا يوجد إعلان متاح: نرسل status=noads ونغلق الصفحة فوراً
+        // الحالة الوحيدة المسموح فيها بالتعويض دون تشغيل: تعذّر تهيئة الإعلانات
+        // تماماً (السكريبت محظور/لم يُحمّل). لم يظهر أي إعلان إطلاقاً.
         if (!AdController) {
             reportReward("noads");
         } else {
-            // 1. حدث بدء تشغيل الإعلان فعلياً على شاشة المستخدم
+            // (1) أول إطار ظهر على الشاشة => الإعلان بدأ فعلاً، ممنوع التعويض بعده.
             AdController.addEventListener('onStart', () => {
                 adStarted = true;
             });
 
-            // 2. حدث عدم توفر إعلان متاح في السيرفر (No Fill / Banner Not Found)
-            AdController.addEventListener('onBannerNotFound', () => {
-                reportReward("noads"); // تعويض المستخدم
+            // (2) المستخدم أغلق الإعلان => إلغاء بلا مكافأة.
+            AdController.addEventListener('onSkip', () => {
+                markAborted();
+                abortWithoutReward();
             });
 
-            // 3. حدث وقوع خطأ تقني في الجلب
-            AdController.addEventListener('onError', (err) => {
+            // (3) شاهد الإعلان حتى النهاية => مكافأة.
+            AdController.addEventListener('onReward', () => {
+                markAborted();
+                reportReward("reward");
+            });
+
+            // (4) إعلان بيني (interstitial) انتهى أو أُغلق => لا مكافأة.
+            //     لمكافأة الفيديو نعتمد على onReward/show-ال resolve.
+            AdController.addEventListener('onComplete', () => {
+                markAborted();
+                abortWithoutReward();
+            });
+
+            // (5) خطأ أثناء العرض أو التشغيل: إذا لم يبدأ الإعلان إطلاقاً فهذا
+            //     فشل جلب => تعويض. أما إذا كان قد بدأ فعلاً فالخطأ وقع أثناء
+            //     التشغيل (المستخدم أغلقه) => لا تعويض.
+            AdController.addEventListener('onError', () => {
+                adResolved = true;
                 if (!adStarted) {
-                    reportReward("noads"); // تعويض إذا حدث الخطأ قبل بدء الإعلان
+                    reportReward("noads");
+                } else {
+                    abortWithoutReward();
                 }
             });
 
-            // 4. طلب تشغيل الإعلان
+            // (6) لا يوجد إعلان لعرضه (No Fill) => الحالة الشرعية الوحيدة للتعويض.
+            AdController.addEventListener('onBannerNotFound', () => {
+                adResolved = true;
+                if (!adStarted) {
+                    reportReward("noads");
+                } else {
+                    abortWithoutReward();
+                }
+            });
+
+            // (7) منع عرض إعلانات متتالية / جلسة طويلة => لا إعلان متاح الآن
+            //     (لم يبدأ أي إعلان) => تعويض.
+            AdController.addEventListener('onNonStopShow', () => {
+                adResolved = true;
+                if (!adStarted) {
+                    reportReward("noads");
+                } else {
+                    abortWithoutReward();
+                }
+            });
+            AdController.addEventListener('onTooLongSession', () => {
+                adResolved = true;
+                if (!adStarted) {
+                    reportReward("noads");
+                } else {
+                    abortWithoutReward();
+                }
+            });
+
+            // (8) طلب تشغيل الإعلان.
             AdController.show()
                 .then(() => {
-                    // شاهد المستخدم الإعلان كاملاً بنجاح
+                    // حُسم الإعلان بنجاح: شوهد حتى النهاية.
+                    adResolved = true;
+                    markAborted();
                     reportReward("reward");
                 })
                 .catch((result) => {
-                    // التمييز الدقيق بين فشل الإعلان وبين تخطي المستخدم له
-                    const isFailure = !adStarted ||
-                                      result?.error === true ||
-                                      result?.state === 'load' ||
-                                      result?.state === 'render';
+                    // حُسم الإعلان (فشل أو تخطٍ).
+                    adResolved = true;
 
-                    if (isFailure) {
-                        // فشل الإعلان في التحميل أو لم يظهر أساساً -> تعويض
+                    // القرار الحاسم: هل ظهر إعلان فعلاً؟
+                    //   - ظهر (أي إشارة onStart / state=playing|destroy) => إلغاء.
+                    //   - لم يظهر، والفشل في مرحلة التحميل (error=true & state=load
+                    //     أو state=render أو error=true) => تعويض.
+                    const state = result && result.state;
+                    const isError = !!(result && result.error === true);
+                    const wasPlaying =
+                        adStarted ||
+                        state === 'playing' ||
+                        state === 'destroy';
+
+                    if (wasPlaying) {
+                        // الإعلان ظهر ثم أغلقه المستخدم/تخطاه => لا تعويض.
+                        abortWithoutReward();
+                        return;
+                    }
+
+                    // لم يظهر أي إعلان:
+                    //  - خطأ تحميل صريح، أو فشل قبل العرض => تعويض.
+                    //  - التخطي دون بدء (error=false) نادر جداً؛ نمنح تعويضاً فقط
+                    //    إذا كان الخطأ صريحاً في مرحلة التحميل/العرض.
+                    const loadFailure =
+                        isError && (state === 'load' || state === 'render' || !state);
+
+                    if (loadFailure) {
                         reportReward("noads");
                     } else {
-                        // الإعلان ظهر واشتغل، لكن المستخدم تعمد إغلاقه أو تخطيه
-                        // -> إغلاق بدون رصيد
-                        tg.close();
+                        // تخطٍ أو رفض غير معروف دون أي إشارة عرض => لا تعويض
+                        // (نمنع أي ربح غير مستحق لعدم اكتمال أي إعلان).
+                        abortWithoutReward();
                     }
                 });
         }
 
-        // ===== 5-second fallback timeout =====
-        // إذا لم يُطلق Adsgram أي حدث خلال 5 ثوانٍ، نرسل status=noads (تعويض)
-        // ونغلق نافذة الـ WebApp. يعالج ذلك مشاكل الشبكة وحجب الإعلانات.
+        // ==========================================================================
+        //  مهلة احتياطية آمنة:
+        //  تُطلق التعويض فقط إذا لم تظهر أي إشارة إطلاقاً (لا بدء، ولا حسم).
+        //  لذلك لا يمكن أن تُمنح المكافأة أثناء إعلان قيد التشغيل، لأن onStart
+        //  يضبط adStarted ويمنع المهلة. المدة 12 ثانية (زمن تحميل معقول).
+        // ==========================================================================
         setTimeout(() => {
-            if (!rewardReported) {
-                console.log("Fallback timeout triggered: no ads available, granting grace");
-                reportReward("noads");
-            }
-        }, 5000);
+            if (finished || adResolved || adStarted) return;
+            console.log("Fallback timeout: no ad ever started, granting grace");
+            reportReward("noads");
+        }, 12000);
     </script>
 </body>
 </html>
