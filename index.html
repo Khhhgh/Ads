@@ -77,7 +77,11 @@
         let rewardReported = false; // حماية ضد التكرار
         let adStarted = false;      // يتحول إلى true فقط إذا بدأ عرض الإعلان فعلياً للمستخدم
 
-        async function reportReward() {
+        // status:
+        //   "reward" -> شاهد المستخدم الإعلان كاملاً بنجاح (المكافأة العادية)
+        //   "noads"  -> تعذّر جلب إعلان (No Fill / فشل تقني / حظر السكريبت)
+        //               => السيرفر يمنح رصيد التعويض (Grace Fallback) ويكمل التحميل
+        async function reportReward(status) {
             if (rewardReported) return;
             rewardReported = true;
 
@@ -88,6 +92,7 @@
             try {
                 const body = new URLSearchParams();
                 body.set("initData", initData);
+                body.set("status", status === "noads" ? "noads" : "reward");
                 // ننتظر رد السيرفر بالكامل قبل الإغلاق، حتى لا تُغلق النافذة
                 // والطلب لم يصل/لم يُعالج بعد.
                 const res = await fetch(REWARD_ENDPOINT, {
@@ -103,6 +108,7 @@
             } catch (e) {
                 console.warn("reward post failed", e);
             } finally {
+                // تُغلق نافذة الـ WebApp فوراً في كل الحالات.
                 tg.close();
             }
         }
@@ -117,9 +123,10 @@
             console.error("Adsgram init error:", err);
         }
 
-        // إذا تعذر جلب السكريبت أو تهيئة الإعلانات تماماً -> منح الرصيد وإغلاق الصفحة فوراً
+        // إذا تعذر جلب السكريبت أو تهيئة الإعلانات تماماً
+        // => لا يوجد إعلان متاح: نرسل status=noads ونغلق الصفحة فوراً
         if (!AdController) {
-            reportReward();
+            reportReward("noads");
         } else {
             // 1. حدث بدء تشغيل الإعلان فعلياً على شاشة المستخدم
             AdController.addEventListener('onStart', () => {
@@ -128,13 +135,13 @@
 
             // 2. حدث عدم توفر إعلان متاح في السيرفر (No Fill / Banner Not Found)
             AdController.addEventListener('onBannerNotFound', () => {
-                reportReward(); // منح الرصيد تعويضاً للمستخدم
+                reportReward("noads"); // تعويض المستخدم
             });
 
             // 3. حدث وقوع خطأ تقني في الجلب
             AdController.addEventListener('onError', (err) => {
                 if (!adStarted) {
-                    reportReward(); // منح الرصيد إذا حدث الخطأ قبل بدء الإعلان
+                    reportReward("noads"); // تعويض إذا حدث الخطأ قبل بدء الإعلان
                 }
             });
 
@@ -142,24 +149,35 @@
             AdController.show()
                 .then(() => {
                     // شاهد المستخدم الإعلان كاملاً بنجاح
-                    reportReward();
+                    reportReward("reward");
                 })
                 .catch((result) => {
                     // التمييز الدقيق بين فشل الإعلان وبين تخطي المستخدم له
-                    const isFailure = !adStarted || 
-                                      result?.error === true || 
-                                      result?.state === 'load' || 
+                    const isFailure = !adStarted ||
+                                      result?.error === true ||
+                                      result?.state === 'load' ||
                                       result?.state === 'render';
 
                     if (isFailure) {
-                        // فشل الإعلان في التحميل أو لم يظهر أساساً -> منحه الرصيد تعويضاً
-                        reportReward();
+                        // فشل الإعلان في التحميل أو لم يظهر أساساً -> تعويض
+                        reportReward("noads");
                     } else {
-                        // الإعلان ظهر واشتغل، لكن المستخدم تعمد إغلاقه أو تخطيه -> إغلاق بدون رصيد
+                        // الإعلان ظهر واشتغل، لكن المستخدم تعمد إغلاقه أو تخطيه
+                        // -> إغلاق بدون رصيد
                         tg.close();
                     }
                 });
         }
+
+        // ===== 5-second fallback timeout =====
+        // إذا لم يُطلق Adsgram أي حدث خلال 5 ثوانٍ، نرسل status=noads (تعويض)
+        // ونغلق نافذة الـ WebApp. يعالج ذلك مشاكل الشبكة وحجب الإعلانات.
+        setTimeout(() => {
+            if (!rewardReported) {
+                console.log("Fallback timeout triggered: no ads available, granting grace");
+                reportReward("noads");
+            }
+        }, 5000);
     </script>
 </body>
 </html>
